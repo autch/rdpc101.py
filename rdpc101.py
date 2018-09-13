@@ -26,76 +26,47 @@ if args.list:
     devices = sorted(librdpc101.enumerate(), key=lambda x: x['path'])
     i = 0
     for dev in devices:
-        d = librdpc101.RDPC101(dev['path'])
-        try:
+        with librdpc101.open(dev['path']) as d:
             d.update_status()
             f = d.get_freq()
-            print "device %d: %s %s %s %ddB" % (i, bm.get_band_name(f), bm.get_freq_format(f),
-                                                d.get_channel_format(), d.get_intensity())
-        finally:
-            d.close()
+            print("device %d: %s %s %s %ddB" % (i, bm.get_band_name(f), bm.get_freq_format(f),
+                                                d.get_channel_format(), d.get_intensity()))
         i += 1
     sys.exit(0)
 
 if args.freq:
-    f_freq = 0.0
-    i_freq = 0
     try:
         f_freq = float(args.freq)
-    except ValueError, e:
-        print "freq must be numerals"
+    except ValueError as e:
+        print("freq must be numerals")
         ap.print_help()
         sys.exit(1)
 
-    i_freq = int(f_freq)
     bm = librdpc101.BandMap()
-
-    band = bm.get_band(i_freq * 100.0)
-    if band and band['band'] == librdpc101.RDPC_BAND_FM:
-        if args.expert:
-            freq = int(f_freq * 100.0)
-        else:
-            freq = ((int(f_freq * 100.0) + band['step'] / 2) / band['step']) * band['step']
-        if args.stereo is None:
-            args.stereo = True
-    band = bm.get_band(i_freq)
-    if freq is None and band and band['band'] == librdpc101.RDPC_BAND_AM:
-        if args.expert:
-            freq = i_freq
-        else:
-            freq = ((i_freq + (band['step'] / 2)) / band['step']) * band['step']
-        args.stereo = False
-
-    if freq is None:
-        print 'Frequency out of range'
+    freq, band, stereo = bm.get_tuning_freq(f_freq, exact=args.expert)
+    if not freq:
+        print('Frequency out of range')
         ap.print_help()
         sys.exit(1)
 
-dev = None
-try:
-    try:
-        if args.device is not None:
-            devices = sorted(librdpc101.enumerate(), key=lambda x: x['path'])
-            if args.device >= len(devices):
-                print 'Device index out of range'
-                sys.exit(1)
-            nth = devices[args.device]
-            if not nth:
-                print 'Device index out of range'
-                sys.exit(1)
-            dev = librdpc101.RDPC101(nth['path'])
-        else:
-            dev = librdpc101.RDPC101()
-    except IOError, e:
-        print "Unable to open device"
-        sys.exit(2)
+path = None
+if args.device:
+    devices = sorted(librdpc101.enumerate(), key=lambda x: x['path'])
+    if args.device >= len(devices):
+        print('Device index out of range')
+        sys.exit(1)
+    nth = devices[args.device]
+    if not nth:
+        print('Device index out of range')
+        sys.exit(1)
+    path = nth['path']
 
+with librdpc101.open(path) as dev:
     def show_status(d):
         bm = librdpc101.BandMap()
-        f = d.get_freq()
-        print "%s %s %s %ddB" % (bm.get_band_name(f), bm.get_freq_format(f),
-                                 d.get_channel_format(), d.get_intensity())
-
+        f = d.get_freq(True)
+        print("%s %s %s %ddB" % (bm.get_band_name(f), bm.get_freq_format(f),
+                                d.get_channel_format(), d.get_intensity()))
 
     if freq:
         bm = librdpc101.BandMap()
@@ -107,15 +78,19 @@ try:
             dev.set_band(band['band'])
         if cur_freq != freq:
             dev.set_freq(freq)
-    elif args.seek is not None:
-        dev.set_mute(1)
-        dev.set_seek(args.seek)
-        while dev.get_seeking():
-            time.sleep(0.2)
-        dev.set_mute(0)
+        dev.wait_seeking()
         dev.update_status()
         show_status(dev)
-    elif args.scan is not None:
+    elif args.seek:
+        dev.set_mute(1)
+        try:
+            dev.set_seek(args.seek)
+            dev.wait_seeking()
+        finally:
+            dev.set_mute(0)
+        dev.update_status()
+        show_status(dev)
+    elif args.scan:
         bandname = args.scan.lower()
         bm = librdpc101.BandMap()
 
@@ -127,7 +102,7 @@ try:
         elif bandname[0] == 'f':
             band = bm.get_band_by_index(librdpc101.RFD_FM)
         else:
-            print 'unsupported band'
+            print('unsupported band')
             ap.print_help()
             sys.exit(1)
 
@@ -135,16 +110,14 @@ try:
         try:
             dev.set_band(band['band'])
             dev.set_freq(band['min'])
-            while dev.get_seeking():
-                time.sleep(0.2)
+            dev.wait_seeking()
 
             p_freq = band['min']
-            c_freq = dev.get_freq()
+            c_freq = dev.get_freq(True)
             while c_freq < band['max']:
                 dev.set_seek(librdpc101.RDPC_SEEK_UP)
-                while dev.get_seeking():
-                    time.sleep(0.2)
-                c_freq = dev.get_freq()
+                dev.wait_seeking()
+                c_freq = dev.get_freq(True)
                 if p_freq != c_freq:
                     show_status(dev)
                     p_freq = c_freq
@@ -153,8 +126,6 @@ try:
                 dev.set_band(o_band['band'])
             dev.set_freq(o_freq)
             dev.set_mute(0)
-    if args.stereo:
+
+    if args.stereo is not None:
         dev.set_ma(librdpc101.RDPC_MA_STEREO if args.stereo else librdpc101.RDPC_MA_MONO)
-finally:
-    if dev:
-        dev.close()

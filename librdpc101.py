@@ -1,5 +1,7 @@
 # -*- mode: python; encoding: utf-8; -*-
 
+from contextlib import contextmanager
+
 import hid
 
 RDPC101_VENDORID = 0x10c4
@@ -37,12 +39,21 @@ def enumerate():
     return hid.enumerate(RDPC101_VENDORID, RDPC101_PRODUCTID)
 
 
+@contextmanager
+def open(path=None):
+    dev = RDPC101(path)
+    try:
+        yield dev
+    finally:
+        dev.close()
+
+
+
 class BandMap:
     def __init__(self):
         self.band_map = [
-            {'band': RDPC_BAND_AM, 'min': 522, 'max': 1629, 'step': 9},
-            {'band': RDPC_BAND_FM, 'min': 7600, 'max': 9000, 'step': 10},
-            {'band': RDPC_BAND_FM, 'min': 9005, 'max': 10800, 'step': 5}
+            {'band': RDPC_BAND_AM, 'min': 531, 'max': 1602, 'step': 9},
+            {'band': RDPC_BAND_FM, 'min': 7600, 'max': 9490, 'step': 10}
         ]
 
     def get_band(self, freq):
@@ -74,6 +85,25 @@ class BandMap:
             return '%6d kHz' % freq
         return '---- Hz'
 
+    def get_tuning_freq(self, freq, exact=False):
+        def adjuster(freq, step, multiplier=1, exact=False):
+            freq = int(freq * multiplier)
+            if not exact:
+                freq = ((freq + (step // 2)) // step) * step
+            return freq
+
+        band = self.get_band(freq * 100.0)
+        if band and band['band'] == RDPC_BAND_FM:
+            freq = adjuster(freq, band['step'], 100.0, exact)
+            return freq, band, True
+
+        i_freq = int(freq)
+        band = self.get_band(i_freq)
+        if band and band['band'] == RDPC_BAND_AM:
+            freq = adjuster(i_freq, band['step'], 1, exact)
+            return freq, band, False
+        return None, None, None
+
 
 class RDPC101:
     def __init__(self, path=None):
@@ -88,22 +118,23 @@ class RDPC101:
         self.hid_dev.close()
 
     def update_status(self):
-        self.report_pkt = self.hid_dev.read(1024)
+        self.report_pkt = self.hid_dev.read(64)
 
-    def get_freq(self):
-        if not self.report_pkt:
+    def update_if_none(self, force=False):
+        if not self.report_pkt or force:
             self.update_status()
+
+    def get_freq(self, force=False):
+        self.update_if_none(force)
         return ((self.report_pkt[RDPC_STATE_INDEX_FREQ_HI] << 8) |
                 self.report_pkt[RDPC_STATE_INDEX_FREQ_LO])
 
-    def get_channels(self):
-        if not self.report_pkt:
-            self.update_status()
+    def get_channels(self, force=False):
+        self.update_if_none(force)
         return self.report_pkt[RDPC_STATE_INDEX_MA]
 
-    def get_intensity(self):
-        if not self.report_pkt:
-            self.update_status()
+    def get_intensity(self, force=False):
+        self.update_if_none(force)
         return self.report_pkt[RDPC_STATE_INDEX_SIGINTENSITY]
 
     def get_seeking(self):
@@ -127,7 +158,7 @@ class RDPC101:
 
     # in kilohertz
     def set_freq(self, freq):
-        return self._send_feature([RDPC_SETFREQ, (freq >> 8) & 0xff, freq & 0xff])
+        return self._send_feature([RDPC_SETFREQ, (int(freq) >> 8) & 0xff, int(freq) & 0xff])
 
     # up = 0x01, down = 0x02
     def set_seek(self, direction):
@@ -140,3 +171,8 @@ class RDPC101:
         elif ch == RDPC_MA_STEREO:
             return 'Stereo'
         return '----'
+
+    def wait_seeking(self, delay=0.1):
+        import time
+        while self.get_seeking():
+            time.sleep(delay)
